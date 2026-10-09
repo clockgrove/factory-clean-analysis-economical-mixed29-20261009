@@ -125,10 +125,34 @@ export async function createAppServer() {
         return json(response, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'Use GET for this read-only server' } });
       }
       const url = new URL(request.url, 'http://127.0.0.1');
-      if (url.pathname === '/api/incidents' || url.pathname === '/api/export.csv') {
+      if (url.pathname === '/api/incidents' || url.pathname === '/api/export.csv' || url.pathname === '/api/overview') {
         const exporting = url.pathname === '/api/export.csv';
+        const overview = url.pathname === '/api/overview';
         const query = parseQuery(url.searchParams, exporting);
         const matches = matching(rows, query);
+        if (overview) {
+          const services = new Map();
+          for (const row of matches) {
+            let measure = services.get(row.service);
+            if (!measure) {
+              measure = { service: row.service, incidentCount: 0, unresolvedCount: 0, highSeverityCount: 0, resolutionHours: 0, resolvedCount: 0 };
+              services.set(row.service, measure);
+            }
+            measure.incidentCount++;
+            if (row.status !== 'resolved') measure.unresolvedCount++;
+            if (row.severity === 'critical' || row.severity === 'high') measure.highSeverityCount++;
+            if (row.status === 'resolved') {
+              measure.resolutionHours += (Date.parse(row.resolvedAt) - Date.parse(row.openedAt)) / 3600000;
+              measure.resolvedCount++;
+            }
+          }
+          return json(response, 200, { services: [...services.values()]
+            .map(({ resolutionHours, resolvedCount, ...measure }) => ({
+              ...measure,
+              averageResolutionHours: resolvedCount ? resolutionHours / resolvedCount : null,
+            }))
+            .sort((a, b) => b.unresolvedCount - a.unresolvedCount || compare(a.service, b.service)) });
+        }
         if (exporting) {
           response.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="incidents.csv"', 'Cache-Control': 'no-store' });
           return response.end([fields.join(','), ...matches.map(row => fields.map(key => csvCell(row[key])).join(','))].join('\r\n') + '\r\n');

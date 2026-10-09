@@ -35,6 +35,26 @@ function expected(rows, options = {}) {
   return { found, summary: { total: found.length, unresolved, highSeverity, openedByDay: Object.keys(counts).sort().map(date => ({ date, count: counts[date] })) } };
 }
 
+function expectedOverview(rows, options = {}) {
+  const { found } = expected(rows, options);
+  const groups = new Map();
+  for (const row of found) {
+    if (!groups.has(row.service)) groups.set(row.service, []);
+    groups.get(row.service).push(row);
+  }
+  return [...groups].map(([service, incidents]) => {
+    const resolved = incidents.filter(row => row.status === 'resolved');
+    const hours = resolved.map(row => (Date.parse(row.resolvedAt) - Date.parse(row.openedAt)) / 3600000);
+    return {
+      service,
+      incidentCount: incidents.length,
+      unresolvedCount: incidents.filter(row => row.status === 'open' || row.status === 'in_progress').length,
+      highSeverityCount: incidents.filter(row => row.severity === 'critical' || row.severity === 'high').length,
+      averageResolutionHours: hours.length ? hours.reduce((sum, value) => sum + value, 0) / hours.length : null,
+    };
+  }).sort((a, b) => b.unresolvedCount - a.unresolvedCount || a.service.localeCompare(b.service));
+}
+
 function query(options) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(options)) {
@@ -96,6 +116,13 @@ test('canonical incidents through real loopback HTTP', async t => {
       assert.deepEqual(actual, { items: found.slice((page - 1) * pageSize, page * pageSize), page, pageSize, total: found.length, totalPages, summary });
       return actual;
     };
+    const checkOverview = async (options = {}) => {
+      const response = await fetch(`${base}/api/overview?${query(options)}`);
+      assert.equal(response.status, 200);
+      const actual = await response.json();
+      assert.deepEqual(actual, { services: expectedOverview(rows, options) });
+      return actual;
+    };
 
     await t.test('defaults and whole-result summaries', async () => {
       const body = await checkList();
@@ -103,6 +130,25 @@ test('canonical incidents through real loopback HTTP', async t => {
       assert.equal(body.items.length, 25);
       assert.equal(body.summary.openedByDay.length, 90);
       assert.equal(body.summary.openedByDay.reduce((n, bucket) => n + bucket.count, 0), 2400);
+    });
+    await t.test('overview reduces combined filtered results independently of pagination and sorting', async () => {
+      const filters = { q: 'incident', service: ['Billing', 'Notifications'], status: ['open', 'in_progress', 'resolved'], severity: ['critical', 'high', 'medium'], from: '2026-04-15', to: '2026-06-13' };
+      const matches = expected(rows, filters).found;
+      assert.ok(matches.length > 50, 'combined filters span multiple pages');
+      const first = await checkOverview({ ...filters, page: 1, pageSize: 25, sort: 'openedAt', direction: 'asc' });
+      assert.deepEqual(await checkOverview({ ...filters, page: 3, pageSize: 50, sort: 'severity', direction: 'desc' }), first);
+      assert.deepEqual(first.services, expectedOverview(rows, filters));
+    });
+    await t.test('overview includes unresolved-only services, ordered ties, and empty results', async () => {
+      const unresolvedOnly = await checkOverview({ status: ['open', 'in_progress'], page: 2, pageSize: 50 });
+      assert.ok(unresolvedOnly.services.length > 0);
+      assert.ok(unresolvedOnly.services.every(service => service.averageResolutionHours === null));
+      const ordered = unresolvedOnly.services;
+      for (let index = 1; index < ordered.length; index++) {
+        assert.ok(ordered[index - 1].unresolvedCount > ordered[index].unresolvedCount ||
+          (ordered[index - 1].unresolvedCount === ordered[index].unresolvedCount && ordered[index - 1].service < ordered[index].service));
+      }
+      assert.deepEqual(await checkOverview({ q: 'no such incident' }), { services: [] });
     });
     await t.test('literal case-insensitive search in all three fields', async () => {
       for (const q of ['inc-000001', 'BATCH PROCESSING DELAY', 'sEcOnD LiNe: <SAMPLE>', 'retry, then continue', '.*', '[', 'Cobalt']) await checkList({ q });
