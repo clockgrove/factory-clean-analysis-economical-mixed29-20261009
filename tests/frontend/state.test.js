@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createState, transition, savedView, queryParams, canPaginate, announcement} from '../../public/state.js';
+import {createState, transition, savedView, queryParams, canPaginate, announcement, overviewSignature} from '../../public/state.js';
 // Completion events are component inputs, not HTTP response fixtures.
 const result = (state, page = 1, totalPages = 4) => {
   state = transition(state, {type: 'result:start'});
@@ -136,4 +136,39 @@ test('addresses normalize singleton ambiguity, real UTC dates, numbers and liter
   const intent = normalizeIntent({q: 'a+b & % # / café 雪', service: ['Search', 'Billing', 'Search', 'bad'], status: ['resolved', 'open'], severity: ['high', 'critical'], from: '2026-04-01', to: '2026-06-29', sort: 'severity', direction: 'asc', page: 3, pageSize: 50});
   assert.deepEqual(addressIntent(queryParams(intent)), intent);
   assert.equal(transition(createState(), {type: 'intent', patch: {q: ''}}).resultOp.token, 0);
+});
+
+test('overview ownership follows filter selection, ignores page/sort changes and gates obsolete success, failure and cleanup', () => {
+  let s = createState(), signature = overviewSignature(s.intent);
+  s = transition(s, {type: 'overview:start', signature}); const old = s.overviewOp.token;
+  s = transition(s, {type: 'overview:success', token: old, signature, data: {services: [{service: 'Billing'}]}});
+  const snapshot = s.overview;
+  s = result(s);
+  assert.equal(s.overviewOp.token, old); assert.equal(s.overview, snapshot);
+  s = transition(s, {type: 'overview:start', signature}); const inFlight = s.overviewOp.token;
+  s = transition(s, {type: 'page', delta: 1});
+  s = transition(s, {type: 'intent', patch: {pageSize: 50, sort: 'severity'}});
+  assert.equal(s.overviewOp.token, inFlight); assert.equal(s.overviewOp.pending, true); assert.equal(overviewSignature(s.intent), signature);
+  s = transition(s, {type: 'overview:success', token: inFlight, signature, data: {services: [{service: 'Billing', incidentCount: 20}]}});
+  assert.equal(s.overview.data.services[0].incidentCount, 20);
+  const latestSnapshot = s.overview;
+  s = transition(s, {type: 'overview:start', signature});
+  const currentToken = s.overviewOp.token;
+  s = transition(s, {type: 'intent', patch: {q: 'current selection'}});
+  assert.notEqual(latestSnapshot, snapshot);
+  assert.equal(s.overview, latestSnapshot); assert.equal(s.overviewOp.pending, false);
+  for (const type of ['overview:success', 'overview:failure', 'overview:finish']) {
+    assert.equal(transition(s, {type, token: currentToken, signature, data: {services: []}, error: 'obsolete'}), s);
+  }
+  assert.equal(s.overview, latestSnapshot);
+  signature = overviewSignature(s.intent);
+  s = transition(s, {type: 'overview:start', signature}); const retry = s.overviewOp.token;
+  s = transition(s, {type: 'overview:failure', token: retry, signature, error: 'Current overview failed'});
+  assert.equal(s.overviewOp.error, 'Current overview failed'); assert.equal(announcement(s), 'Current overview failed');
+  s = transition(s, {type: 'overview:start', signature});
+  assert.equal(s.overviewOp.pending, true); assert.equal(s.overviewOp.error, null);
+  assert.equal(transition(s, {type: 'overview:finish', token: retry, signature}), s);
+  s = transition(s, {type: 'overview:success', token: s.overviewOp.token, signature, data: {services: []}});
+  assert.deepEqual(s.overview.data.services, []); assert.equal(s.overview.signature, signature);
+  assert.equal(s.overviewOp.pending, false); assert.equal(s.overviewOp.error, null);
 });
