@@ -24,3 +24,27 @@ Summaries cover all matches, with chronological UTC day buckets.
 `/api/export.csv` applies the same filters and sorting, ignores pagination,
 and exports all fields in dataset order. Tags are JSON array text, null is
 empty, quotes are doubled, and records use CRLF.
+
+`/api/overview` accepts the same query meanings as `/api/incidents` and returns
+`{services:[{service,incidentCount,unresolvedCount,highSeverityCount,averageResolutionHours}]}`.
+Every measure uses the whole filtered result; page, page size and sorting do not
+change it. Unresolved means open or in-progress; high severity means critical or
+high. Average resolution hours is elapsed opened-to-resolved time averaged only
+across resolved incidents. No resolved matches produce null (shown as Unavailable),
+and no matches produce an empty services array. Services sort by unresolved count
+descending, then service name ascending. The endpoint is read-only; personal
+triage and notes stay in browser storage and are never sent to it.
+
+In the supplied qualification environment, run from the checkout in order:
+
+```sh
+npm run pretest
+qualification-browser-smoke
+npm test
+```
+
+Preparation checks the canonical data and pinned tooling; the probe verifies real
+sandbox-enabled Chromium and loopback HTTP. Discoverable integration tests use
+actual application HTTP and Chromium, including the finite `npm run start` proof,
+and close their servers, browsers and subprocesses. The normal startup URL is
+http://127.0.0.1:3000; Ctrl+C or SIGTERM shuts down the foreground server.
